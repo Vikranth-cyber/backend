@@ -21,7 +21,8 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 
 CORS(app, resources={r"/*": {"origins": [
-    "https://frontend-cpekzuer2-vikranths-projects-c28738f4.vercel.app"
+    "https://frontend-six-peach-11.vercel.app",  # Your new Vercel URL
+    "https://backend-43xv.onrender.com"  # For backend-to-backend calls if needed
 ]}}, supports_credentials=True)
 
 db = SQLAlchemy(app)
