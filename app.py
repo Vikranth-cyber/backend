@@ -20,7 +20,8 @@ app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(basedir, 'data
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 
-CORS(app, origins=["https://frontend-six-peach-11.vercel.app"], supports_credentials=True)
+CORS(app, origins=["http://localhost:5173", "https://frontend-six-peach-11.vercel.app"], supports_credentials=True)
+
 
 db = SQLAlchemy(app)
 
@@ -138,34 +139,35 @@ def upload_csv(current_user):
     if not file or not file.filename.endswith('.csv'):
         return jsonify({'message': 'CSV file required'}), 400
 
-    # Create qrcodes directory if it doesn't exist
-    qr_dir = os.path.join(basedir, 'qrcodes')
-    os.makedirs(qr_dir, exist_ok=True)
-
     reader = csv.DictReader(file.read().decode('utf-8').splitlines())
     processed = []
 
-    for row in reader:
-        product_id = row.get('unique_id', '').strip()
-        manufacturer = row.get('manufacturer', '').strip()
-        if not product_id or not manufacturer:
-            continue
+    # Create QR codes in memory
+    zip_buffer = BytesIO()
+    with ZipFile(zip_buffer, 'w') as zip_file:
+        for row in reader:
+            product_id = row.get('unique_id', '').strip()
+            manufacturer = row.get('manufacturer', '').strip()
+            if not product_id or not manufacturer:
+                continue
 
-        if not Product.query.filter_by(product_id=product_id).first():
-            db.session.add(Product(product_id=product_id, manufacturer=manufacturer))
-            processed.append(product_id)
+            # Save to DB
+            if not Product.query.filter_by(product_id=product_id).first():
+                db.session.add(Product(product_id=product_id, manufacturer=manufacturer))
+                processed.append(product_id)
 
-        # Generate and save QR code
-        img = qrcode.make(product_id)
-        img_path = os.path.join(qr_dir, f"{product_id}.png")
-        img.save(img_path)
+            # Generate QR
+            img = qrcode.make(product_id)
+            img_io = BytesIO()
+            img.save(img_io)
+            img_io.seek(0)
+            zip_file.writestr(f"{product_id}.png", img_io.read())
 
     db.session.commit()
 
-    return jsonify({
-        'message': f'Successfully processed {len(processed)} products. QR codes saved in qrcodes folder.',
-        'count': len(processed)
-    })
+    zip_buffer.seek(0)
+    return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='qrcodes.zip')
+
 @app.route('/scan', methods=['POST'])
 def scan_product():
     data = request.get_json()
