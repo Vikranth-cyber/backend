@@ -1,0 +1,9 @@
+Flask
+Flask-Cors
+Flask-SQLAlchemy
+python-dotenv
+gunicorn
+qrcode
+PyJWT
+Werkzeug
+passlib
