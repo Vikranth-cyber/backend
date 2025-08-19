@@ -24,7 +24,10 @@ app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(basedir, 'data
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 CORS(app,
-     origins=["http://localhost:5173"],
+     origins=[
+         "http://localhost:5173", 
+         "https://frontend-six-peach-11.vercel.app"
+     ],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization"])
 db = SQLAlchemy(app)
