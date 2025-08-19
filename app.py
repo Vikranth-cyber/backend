@@ -1,4 +1,3 @@
-# app.py (updated)
 from flask import Flask, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
@@ -12,6 +11,10 @@ from zipfile import ZipFile
 from werkzeug.security import generate_password_hash, check_password_hash
 import jwt
 from functools import wraps
+import barcode
+from barcode.writer import ImageWriter
+from barcode import Code128, Code39
+import json
 
 app = Flask(__name__)
 
@@ -20,10 +23,10 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{os.path.join(basedir, 'database.db')}"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'your-secret-key-here'
-CORS(app, resources={r"/*": {"origins": [
-    "http://localhost:5173",
-    "https://frontend-six-peach-11.vercel.app"
-]}}, supports_credentials=True)
+CORS(app,
+     origins=["http://localhost:5173"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization"])
 db = SQLAlchemy(app)
 
 # Models
@@ -31,8 +34,15 @@ class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
+    email = db.Column(db.String(120))
+    phone = db.Column(db.String(20))
     is_manufacturer = db.Column(db.Boolean, default=False)
-    manufacturer_name = db.Column(db.String(100))  # Added manufacturer name field
+    manufacturer_name = db.Column(db.String(100))
+    preferences = db.Column(db.String(500), default=json.dumps({
+        'theme': 'light',
+        'notifications': True,
+        'language': 'en'
+    }))
 
 class Product(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -92,24 +102,43 @@ def home():
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
-    if not data or not all(k in data for k in ['username', 'password', 'is_manufacturer']):
+    if not data or not all(k in data for k in ['username', 'password', 'manufacturer_name']):
         return jsonify({'message': 'All fields are required'}), 400
 
     if User.query.filter_by(username=data['username']).first():
         return jsonify({'message': 'Username already exists'}), 400
 
     hashed = generate_password_hash(data['password'], method='pbkdf2:sha256')
-    manufacturer_name = data.get('manufacturer_name') if data['is_manufacturer'] else None
     user = User(
         username=data['username'],
         password=hashed,
-        is_manufacturer=data['is_manufacturer'],
-        manufacturer_name=manufacturer_name
+        email=data.get('email'),
+        phone=data.get('phone'),
+        is_manufacturer=True,  # All registered users are manufacturers
+        manufacturer_name=data['manufacturer_name'],
+        preferences=json.dumps({
+            'theme': 'light',
+            'notifications': True,
+            'language': 'en'
+        })
     )
     db.session.add(user)
     db.session.commit()
 
-    return jsonify({'message': 'Registered successfully'}), 201
+    # Automatically log in after registration
+    token = jwt.encode({
+        'username': user.username,
+        'is_manufacturer': user.is_manufacturer,
+        'manufacturer_name': user.manufacturer_name,
+        'user_id': user.id,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+    }, app.config['SECRET_KEY'])
+
+    return jsonify({
+        'token': token,
+        'is_manufacturer': user.is_manufacturer,
+        'manufacturer_name': user.manufacturer_name
+    }), 201
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -131,6 +160,105 @@ def login():
         'is_manufacturer': user.is_manufacturer,
         'manufacturer_name': user.manufacturer_name
     })
+
+@app.route('/profile', methods=['GET'])
+@token_required
+def get_profile(current_user):
+    return jsonify({
+        'username': current_user.username,
+        'email': current_user.email,
+        'phone': current_user.phone,
+        'is_manufacturer': current_user.is_manufacturer,
+        'manufacturer_name': current_user.manufacturer_name,
+        'preferences': json.loads(current_user.preferences)
+    })
+
+@app.route('/update_profile', methods=['POST'])
+@token_required
+def update_profile(current_user):
+    data = request.get_json()
+    if not data:
+        return jsonify({'message': 'No data provided'}), 400
+    
+    # Validate username if changed
+    if 'username' in data and data['username'] != current_user.username:
+        if User.query.filter_by(username=data['username']).first():
+            return jsonify({'message': 'Username already exists'}), 400
+        current_user.username = data['username']
+    
+    if 'email' in data:
+        current_user.email = data['email']
+    if 'phone' in data:
+        current_user.phone = data['phone']
+    if 'manufacturer_name' in data and current_user.is_manufacturer:
+        current_user.manufacturer_name = data['manufacturer_name']
+    
+    db.session.commit()
+    
+    return jsonify({
+        'message': 'Profile updated successfully',
+        'user': {
+            'username': current_user.username,
+            'email': current_user.email,
+            'phone': current_user.phone,
+            'is_manufacturer': current_user.is_manufacturer,
+            'manufacturer_name': current_user.manufacturer_name,
+            'preferences': json.loads(current_user.preferences)
+        }
+    })
+
+@app.route('/change_password', methods=['POST'])
+@token_required
+def change_password(current_user):
+    data = request.get_json()
+    if not data or not all(k in data for k in ['current_password', 'new_password']):
+        return jsonify({'message': 'Current and new password required'}), 400
+    
+    if not check_password_hash(current_user.password, data['current_password']):
+        return jsonify({'message': 'Current password is incorrect'}), 400
+    
+    if len(data['new_password']) < 8:
+        return jsonify({'message': 'New password must be at least 8 characters'}), 400
+    
+    current_user.password = generate_password_hash(data['new_password'], method='pbkdf2:sha256')
+    db.session.commit()
+    
+    return jsonify({'message': 'Password changed successfully'})
+
+@app.route('/update_preferences', methods=['POST'])
+@token_required
+def update_preferences(current_user):
+    data = request.get_json()
+    if not data or 'preferences' not in data:
+        return jsonify({'message': 'Preferences data required'}), 400
+    
+    try:
+        # Validate preferences structure
+        preferences = data['preferences']
+        if not isinstance(preferences, dict):
+            raise ValueError("Preferences must be an object")
+        
+        # Update only valid preference fields
+        current_prefs = json.loads(current_user.preferences)
+        
+        if 'theme' in preferences and preferences['theme'] in ['light', 'dark']:
+            current_prefs['theme'] = preferences['theme']
+        
+        if 'notifications' in preferences and isinstance(preferences['notifications'], bool):
+            current_prefs['notifications'] = preferences['notifications']
+        
+        if 'language' in preferences and preferences['language'] in ['en', 'es', 'fr', 'de']:
+            current_prefs['language'] = preferences['language']
+        
+        current_user.preferences = json.dumps(current_prefs)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Preferences updated successfully',
+            'preferences': current_prefs
+        })
+    except Exception as e:
+        return jsonify({'message': str(e)}), 400
 
 @app.route('/products', methods=['POST'])
 @token_required
@@ -162,6 +290,9 @@ def upload_csv(current_user):
         return jsonify({'message': 'Only manufacturers can upload products'}), 403
 
     file = request.files.get('file')
+    code_type = request.form.get('code_type', 'qr').lower()
+    barcode_type = request.form.get('barcode_type', 'code128').lower()
+    
     if not file or not file.filename.endswith('.csv'):
         return jsonify({'message': 'CSV file required'}), 400
 
@@ -217,15 +348,34 @@ def upload_csv(current_user):
                     ))
                     processed.append(product_id)
 
-                img = qrcode.make(product_id)
-                img_io = BytesIO()
-                img.save(img_io)
-                img_io.seek(0)
-                zip_file.writestr(f"{product_id}.png", img_io.read())
+                # Generate the requested code type
+                if code_type == 'qr':
+                    img = qrcode.make(product_id)
+                    img_io = BytesIO()
+                    img.save(img_io, 'PNG')
+                    img_io.seek(0)
+                    zip_file.writestr(f"{product_id}.png", img_io.read())
+                elif code_type == 'barcode':
+                    try:
+                        if barcode_type == 'code128':
+                            code = Code128(product_id, writer=ImageWriter())
+                        elif barcode_type == 'code39':
+                            code = Code39(product_id, writer=ImageWriter())
+                        else:
+                            code = Code128(product_id, writer=ImageWriter())
+
+                        img_io = BytesIO()
+                        code.write(img_io, options={'write_text': False})
+                        img_io.seek(0)
+                        zip_file.writestr(f"{product_id}.png", img_io.read())
+                    except Exception as e:
+                        print(f"Error generating barcode for {product_id}: {str(e)}")
+                        continue
 
         db.session.commit()
         zip_buffer.seek(0)
-        return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='qrcodes.zip')
+        filename = f'{code_type}_codes.zip' if code_type == 'qr' else f'{barcode_type}_codes.zip'
+        return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name=filename)
 
     except Exception as e:
         return jsonify({'message': str(e)}), 500
@@ -261,9 +411,7 @@ def scan_product():
     data = request.get_json()
     raw = data['product_id']
     product_id = raw.split(' ')[1] if raw.startswith("ID:") else raw.strip()
-    name = data['name']
-    phone = data['phone']
-    pincode = data['pincode']
+    name, phone, pincode = data['name'], data['phone'], data['pincode']
 
     product = Product.query.filter_by(product_id=product_id).first()
     if not product:
@@ -273,31 +421,17 @@ def scan_product():
             'scanned_code': raw
         }), 200
 
-    existing_scan = ScanLog.query.filter_by(product_id=product_id, phone_number=phone).first()
-    if existing_scan:
-        create_notification(existing_scan.id, f"Duplicate scan by {name} for {product_id}")
-        return jsonify({
-            "status": "already_scanned",
-            "message": "This product was already scanned with this phone number",
-            "product": {"product_id": product.product_id, "manufacturer": product.manufacturer},
-            "first_scan": {
-                "name": existing_scan.name,
-                "phone": existing_scan.phone_number,
-                "pincode": existing_scan.pincode,
-                "timestamp": existing_scan.timestamp.isoformat()
-            }
-        })
-
     previous_scans = ScanLog.query.filter_by(product_id=product_id).order_by(ScanLog.timestamp.asc()).all()
+
     new_scan = ScanLog(product_id=product_id, name=name, phone_number=phone, pincode=pincode, product=product)
     db.session.add(new_scan)
     db.session.commit()
 
-    if previous_scans:
-        create_notification(new_scan.id, f"Multiple scans for {product_id} by {name}")
+    if previous_scans:  # duplicate scan
+        create_notification(new_scan.id, f"⚠️ Duplicate scan for {product_id} by {name}")
         return jsonify({
-            "status": "genuine",
-            "message": "Product is genuine but scanned before",
+            "status": "duplicate",
+            "message": "This product has already been scanned before",
             "product": {"product_id": product.product_id, "manufacturer": product.manufacturer},
             "first_scan": {
                 "name": previous_scans[0].name,
@@ -307,11 +441,13 @@ def scan_product():
             }
         })
 
+    # no notification for first scan
     return jsonify({
         "status": "genuine",
         "message": "First valid scan - Product is genuine",
         "product": {"product_id": product.product_id, "manufacturer": product.manufacturer}
     })
+
 
 @app.route('/scans', methods=['GET'])
 @token_required
@@ -390,31 +526,26 @@ def get_products(current_user):
 
 def init_db():
     with app.app_context():
-        # Drop all tables first to ensure clean slate
-        db.drop_all()
-        
-        # Create all tables with new schema
         db.create_all()
-        
-        # Add initial data
-        if Product.query.count() == 0:
-            # Create admin user first
+        # only add admin/sample if tables are empty
+        if User.query.count() == 0:
             admin = User(
                 username="admin",
                 password=generate_password_hash("admin123", method='pbkdf2:sha256'),
+                email="admin@example.com",
+                phone="1234567890",
                 is_manufacturer=True,
                 manufacturer_name="Admin Manufacturer"
             )
             db.session.add(admin)
-            db.session.commit()  # Commit to get the admin ID
-            
-            # Now create sample product with admin as owner
+            db.session.commit()
+
             sample = Product(
                 product_id="TEST123",
                 manufacturer="Sample Manufacturer",
                 product_name="Sample Product",
                 expiry_date="2024-12-31",
-                user_id=admin.id  # Link to admin user
+                user_id=admin.id
             )
             db.session.add(sample)
             db.session.commit()
