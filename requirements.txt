@@ -8,3 +8,4 @@ PyJWT
 Werkzeug
 passlib
 Pillow
+python-barcode
